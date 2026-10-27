@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
@@ -8,14 +8,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 import scipy.stats as stats
 import streamlit as st
-from PIL import Image
 
 # =========================================================
 # 1. CONFIGURATION GENERALE
 # =========================================================
 
 st.set_page_config(
-    page_title="BetonLab | Concrete Analyzer",
+    page_title="BetonLab | Analyse du béton",
     page_icon="🏗️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -25,76 +24,47 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(APP_DIR, "betonlab.db")
 
 # =========================================================
-# 2. CONFIGURATION DES COULEURS
-# Modifie ces valeurs pour personnaliser l'application.
+# 2. THEMES
 # =========================================================
 
-COLORS = {
-    "primary": "#173B67",
-    "secondary": "#246B8E",
-    "accent": "#22A699",
-    "background": "#F3F6FB",
-    "panel": "#FFFFFF",
-    "text": "#172B4D",
-    "muted": "#64748B",
-    "danger": "#D64545"
+THEMES = {
+    "Clair": {
+        "fond": "#FFFFFF",
+        "panneau": "#F2F5FA",
+        "texte": "#172B4D",
+        "secondaire": "#64748B",
+        "primaire": "#173B67",
+        "accent": "#087F8C",
+        "bordure": "#D9E2EF",
+        "danger": "#D64545",
+        "graphique": "plotly_white",
+    },
+    "Sombre": {
+        "fond": "#000000",
+        "panneau": "#171717",
+        "texte": "#FFFFFF",
+        "secondaire": "#C1C7D0",
+        "primaire": "#8CB8FF",
+        "accent": "#38D6C5",
+        "bordure": "#444444",
+        "danger": "#FF7070",
+        "graphique": "plotly_dark",
+    }
 }
 
-# =========================================================
-# 3. STYLE CSS
-# =========================================================
-
-st.markdown(
-    f"""
-    <style>
-    .stApp {{
-        background-color: {COLORS["background"]};
-    }}
-
-    [data-testid="stSidebar"] {{
-        background-color: {COLORS["primary"]};
-    }}
-
-    [data-testid="stSidebar"] * {{
-        color: white;
-    }}
-
-    h1, h2, h3 {{
-        color: {COLORS["primary"]};
-    }}
-
-    div.stButton > button {{
-        background-color: {COLORS["accent"]};
-        color: white;
-        border: none;
-        border-radius: 8px;
-        font-weight: 600;
-        padding: 0.55rem 1rem;
-    }}
-
-    div.stButton > button:hover {{
-        background-color: {COLORS["secondary"]};
-        color: white;
-    }}
-
-    [data-testid="stMetric"] {{
-        background-color: white;
-        border: 1px solid #DCE4EF;
-        padding: 16px;
-        border-radius: 12px;
-    }}
-
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+if "theme_betonlab" not in st.session_state:
+    st.session_state.theme_betonlab = "Clair"
 
 # =========================================================
-# 4. BASE DE DONNEES SQLITE
+# 3. BASE DE DONNEES
 # =========================================================
 
-def initialize_database():
-    with sqlite3.connect(DB_PATH, timeout=10) as con:
+def connexion():
+    return sqlite3.connect(DB_PATH, timeout=15)
+
+
+def initialiser_base():
+    with connexion() as con:
         con.execute("""
             CREATE TABLE IF NOT EXISTS tests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,833 +84,1321 @@ def initialize_database():
             ON tests(test_date)
         """)
 
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS historique (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date_heure TEXT NOT NULL,
+                action TEXT NOT NULL,
+                details TEXT DEFAULT ''
+            )
+        """)
+
+        # Migration pour les anciennes bases BetonLab.
+        # La nouvelle colonne conserve la forme de l'éprouvette.
+        colonnes = [
+            ligne[1]
+            for ligne in con.execute(
+                "PRAGMA table_info(tests)"
+            ).fetchall()
+        ]
+
+        if "shape" not in colonnes:
+            con.execute("""
+                ALTER TABLE tests
+                ADD COLUMN shape TEXT DEFAULT 'Prismatique'
+            """)
+
         con.commit()
 
 
-@st.cache_data(ttl=30, show_spinner=False)
-def load_data():
-    """Charge les données et met le résultat en cache."""
-    with sqlite3.connect(DB_PATH, timeout=10) as con:
+def enregistrer_action(action, details=""):
+    with connexion() as con:
+        con.execute("""
+            INSERT INTO historique(date_heure, action, details)
+            VALUES (?, ?, ?)
+        """, (
+            datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+            action,
+            details
+        ))
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def charger_essais():
+    with connexion() as con:
         df = pd.read_sql_query(
-            "SELECT * FROM tests ORDER BY test_date DESC, id DESC",
+            """
+            SELECT * FROM tests
+            ORDER BY test_date DESC, id DESC
+            """,
             con
+        )
+
+    if not df.empty:
+        df["test_date"] = pd.to_datetime(
+            df["test_date"],
+            errors="coerce"
         )
 
     return df
 
 
-def save_test(
-    code,
-    test_date,
-    age,
-    length,
-    width,
-    height,
-    load,
-    strength
+def charger_historique():
+    with connexion() as con:
+        return pd.read_sql_query("""
+            SELECT
+                date_heure AS 'Date et heure',
+                action AS 'Action',
+                details AS 'Détails'
+            FROM historique
+            ORDER BY id DESC
+        """, con)
+
+
+def sauvegarder_essai(
+    code, jour, age, longueur, largeur, hauteur,
+    charge, resistance, forme
 ):
-    with sqlite3.connect(DB_PATH, timeout=10) as con:
+    with connexion() as con:
         con.execute("""
             INSERT INTO tests (
                 sample_code, test_date, age_days,
                 length_mm, width_mm, height_mm,
-                load_kn, strength_mpa
+                load_kn, strength_mpa, shape
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            code,
-            test_date,
-            age,
-            length,
-            width,
-            height,
-            load,
-            strength
+            code, jour, age, longueur, largeur, hauteur,
+            charge, resistance, forme
         ))
 
-        con.commit()
+    charger_essais.clear()
 
-    load_data.clear()
+    enregistrer_action(
+        "Ajout d'un essai",
+        f"Éprouvette {code} — résistance : {resistance:.2f} MPa"
+    )
+
+
+def supprimer_essai(identifiant):
+    with connexion() as con:
+        ligne = con.execute(
+            "SELECT sample_code FROM tests WHERE id = ?",
+            (identifiant,)
+        ).fetchone()
+
+        if ligne:
+            con.execute(
+                "DELETE FROM tests WHERE id = ?",
+                (identifiant,)
+            )
+
+    if ligne:
+        charger_essais.clear()
+        enregistrer_action(
+            "Suppression d'un essai",
+            f"Identifiant {identifiant} — éprouvette {ligne[0]}"
+        )
+
+    return ligne is not None
+
+
+initialiser_base()
+
+# =========================================================
+# 4. CALCUL DE LA RESISTANCE
+# =========================================================
+
+def calculer_resistance(charge_kn, longueur_mm, largeur_mm, forme):
+    """
+    La charge est exprimée en kN.
+    Les dimensions sont exprimées en mm.
+    La résistance obtenue est exprimée en MPa.
+    """
+
+    if charge_kn <= 0:
+        raise ValueError("La charge doit être positive.")
+
+    if longueur_mm <= 0 or largeur_mm <= 0:
+        raise ValueError("Les dimensions doivent être positives.")
+
+    if forme == "Cylindrique":
+        surface = np.pi * longueur_mm**2 / 4
+    else:
+        surface = longueur_mm * largeur_mm
+
+    return charge_kn * 1000 / surface
 
 
 # =========================================================
-# 5. CALCUL DE LA RESISTANCE
+# 5. STATISTIQUES
 # =========================================================
 
-def calculate_strength(load_kn, length_mm, width_mm):
-    area = length_mm * width_mm
-
-    if area <= 0:
-        raise ValueError("The loaded area must be positive.")
-
-    # 1 kN = 1000 N
-    # 1 MPa = 1 N/mm²
-    return load_kn * 1000 / area
-
-
-# =========================================================
-# 6. ANALYSE STATISTIQUE
-# =========================================================
-
-def calculate_statistics(df):
-    x = df["strength_mpa"].to_numpy(dtype=float)
+def calculer_statistiques(df):
+    x = df["strength_mpa"].dropna().to_numpy(dtype=float)
 
     if len(x) == 0:
         return {}
 
-    result = {
-        "count": len(x),
-        "mean": float(np.mean(x)),
-        "median": float(np.median(x)),
+    moyenne = float(np.mean(x))
+    ecart_type = (
+        float(np.std(x, ddof=1))
+        if len(x) > 1 else None
+    )
+
+    return {
+        "nombre": len(x),
+        "moyenne": moyenne,
+        "mediane": float(np.median(x)),
         "minimum": float(np.min(x)),
         "maximum": float(np.max(x)),
-        "range": float(np.ptp(x)),
-        "std": float(np.std(x, ddof=1)) if len(x) > 1 else None
+        "etendue": float(np.ptp(x)),
+        "ecart_type": ecart_type,
+        "cv": (
+            ecart_type / abs(moyenne) * 100
+            if ecart_type is not None and moyenne != 0
+            else None
+        )
     }
 
-    if result["std"] is not None and result["mean"] != 0:
-        result["cv"] = result["std"] / abs(result["mean"]) * 100
-    else:
-        result["cv"] = None
 
-    return result
+def nombre_francais(valeur, decimales=2):
+    if valeur is None or pd.isna(valeur):
+        return "—"
+
+    return f"{valeur:,.{decimales}f}".replace(
+        ",", " "
+    ).replace(".", ",")
 
 
 # =========================================================
-# 7. GRAPHIQUES PLOTLY
+# 6. STYLE ET GRAPHIQUES
 # =========================================================
 
-def apply_chart_style(fig, title):
+def appliquer_style_graphique(fig, titre):
+    couleurs = THEMES[st.session_state.theme_betonlab]
+
     fig.update_layout(
-        title=title,
-        template="plotly_white",
+        title=titre,
+        template=couleurs["graphique"],
         font=dict(
             family="Arial",
-            size=13,
-            color=COLORS["text"]
+            size=14,
+            color=couleurs["texte"]
         ),
         title_font=dict(
             size=20,
-            color=COLORS["primary"]
+            color=couleurs["primaire"]
         ),
-        margin=dict(l=30, r=30, t=70, b=35),
-        hovermode="closest"
+        margin=dict(l=25, r=25, t=65, b=35),
+        hovermode="closest",
+        paper_bgcolor=couleurs["fond"],
+        plot_bgcolor=couleurs["fond"],
+        height=400
     )
 
     return fig
 
 
-def histogram_chart(df):
+def graphique_histogramme(df):
+    couleurs = THEMES[st.session_state.theme_betonlab]
+
     fig = px.histogram(
         df,
         x="strength_mpa",
-        nbins="auto",
-        color_discrete_sequence=[COLORS["secondary"]],
+        nbins=max(5, min(20, len(df))),
+        color_discrete_sequence=[couleurs["accent"]],
         labels={
-            "strength_mpa": "Compressive strength (MPa)",
-            "count": "Number of tests"
+            "strength_mpa": "Résistance (MPa)",
+            "count": "Nombre d'essais"
         }
     )
 
     fig.update_traces(
-        marker_line_color="white",
-        marker_line_width=1
+        marker_line_width=1,
+        marker_line_color=couleurs["fond"]
     )
 
-    return apply_chart_style(
+    return appliquer_style_graphique(
         fig,
-        "Distribution of compressive strength"
+        "Répartition des résistances"
     )
 
 
-def time_chart(df):
-    ordered = df.sort_values("test_date")
+def graphique_evolution(df):
+    couleurs = THEMES[st.session_state.theme_betonlab]
+
+    ordre = df.sort_values("test_date").copy()
 
     fig = px.line(
-        ordered,
+        ordre,
         x="test_date",
         y="strength_mpa",
         markers=True,
-        color_discrete_sequence=[COLORS["accent"]],
+        color_discrete_sequence=[couleurs["accent"]],
         labels={
-            "test_date": "Test date",
-            "strength_mpa": "Strength (MPa)"
-        }
+            "test_date": "Date de l'essai",
+            "strength_mpa": "Résistance (MPa)"
+        },
+        hover_data=["sample_code", "age_days"]
     )
 
-    return apply_chart_style(
+    return appliquer_style_graphique(
         fig,
-        "Compressive strength over time"
+        "Évolution de la résistance dans le temps"
     )
 
 
-def box_chart(df):
+def graphique_boite(df):
+    couleurs = THEMES[st.session_state.theme_betonlab]
+
     fig = px.box(
         df,
         y="strength_mpa",
         points="all",
-        color_discrete_sequence=[COLORS["accent"]],
+        color_discrete_sequence=[couleurs["accent"]],
         labels={
-            "strength_mpa": "Strength (MPa)"
+            "strength_mpa": "Résistance (MPa)"
         }
     )
 
-    return apply_chart_style(
+    return appliquer_style_graphique(
         fig,
-        "Strength variability"
+        "Dispersion des résistances"
     )
 
 
-def normal_chart(df):
-    x = df["strength_mpa"].to_numpy(dtype=float)
+def graphique_normale(df):
+    couleurs = THEMES[st.session_state.theme_betonlab]
+    x = df["strength_mpa"].dropna().to_numpy(dtype=float)
 
     fig = go.Figure()
 
-    fig.add_trace(
-        go.Histogram(
-            x=x,
-            histnorm="probability density",
-            name="Observed data",
-            marker_color=COLORS["secondary"],
-            opacity=0.55,
-            nbinsx="auto"
-        )
-    )
+    fig.add_trace(go.Histogram(
+        x=x,
+        histnorm="probability density",
+        nbinsx=max(5, min(20, len(x))),
+        name="Résultats observés",
+        marker_color=couleurs["primaire"],
+        opacity=0.6
+    ))
 
     if len(x) >= 2:
-        mean = float(np.mean(x))
-        sd = float(np.std(x, ddof=1))
+        moyenne = float(np.mean(x))
+        ecart_type = float(np.std(x, ddof=1))
 
-        if sd > 0:
+        if ecart_type > 0:
             xx = np.linspace(
-                float(np.min(x)),
-                float(np.max(x)),
-                250
+                float(np.min(x)) - ecart_type,
+                float(np.max(x)) + ecart_type,
+                300
             )
 
-            yy = stats.norm.pdf(xx, mean, sd)
+            yy = stats.norm.pdf(
+                xx, loc=moyenne, scale=ecart_type
+            )
 
-            fig.add_trace(
-                go.Scatter(
-                    x=xx,
-                    y=yy,
-                    mode="lines",
-                    name="Normal model",
-                    line=dict(
-                        color=COLORS["accent"],
-                        width=3
-                    )
+            fig.add_trace(go.Scatter(
+                x=xx,
+                y=yy,
+                mode="lines",
+                name="Modèle normal",
+                line=dict(
+                    color=couleurs["accent"],
+                    width=3
                 )
-            )
+            ))
 
     fig.update_layout(
-        xaxis_title="Strength (MPa)",
-        yaxis_title="Probability density"
+        xaxis_title="Résistance (MPa)",
+        yaxis_title="Densité de probabilité"
     )
 
-    return apply_chart_style(
+    return appliquer_style_graphique(
         fig,
-        "Observed distribution and normal model"
+        "Résultats observés et modèle normal"
     )
 
 
 # =========================================================
-# 8. EN-TETE ET IMAGE VECTORIELLE
+# 7. APPARENCE DE L'APPLICATION
 # =========================================================
+
+with st.sidebar:
+    st.title("⚙️ Paramètres")
+
+    theme = st.radio(
+        "Choisir l'apparence",
+        ["Clair", "Sombre"],
+        index=(
+            0 if st.session_state.theme_betonlab == "Clair"
+            else 1
+        ),
+        key="choix_theme"
+    )
+
+    if theme != st.session_state.theme_betonlab:
+        st.session_state.theme_betonlab = theme
+        st.rerun()
+
+C = THEMES[st.session_state.theme_betonlab]
 
 st.markdown(
     f"""
-    <div style="
+    <style>
+    .stApp {{
+        background-color: {C["fond"]};
+        color: {C["texte"]};
+    }}
+
+    [data-testid="stSidebar"] {{
+        background-color: {C["panneau"]};
+        border-right: 1px solid {C["bordure"]};
+    }}
+
+    [data-testid="stSidebar"] * {{
+        color: {C["texte"]};
+    }}
+
+    h1, h2, h3, h4, p, label {{
+        color: {C["texte"]};
+    }}
+
+    [data-testid="stMetric"] {{
+        background-color: {C["panneau"]};
+        border: 1px solid {C["bordure"]};
+        padding: 16px;
+        border-radius: 12px;
+    }}
+
+    div.stButton > button,
+    div.stDownloadButton > button {{
+        border-radius: 9px;
+        border: 1px solid {C["bordure"]};
+        font-weight: 600;
+    }}
+
+    .hero {{
         background: linear-gradient(
-            110deg,
-            {COLORS['primary']},
-            {COLORS['secondary']}
+            110deg, {C["primaire"]}, {C["accent"]}
         );
         padding: 26px;
         border-radius: 16px;
         margin-bottom: 20px;
-    ">
-        <h1 style="color:white;margin:0;">
-            🏗️ BetonLab
-        </h1>
-        <p style="color:white;font-size:16px;margin-bottom:0;">
-            Concrete Compression Test Analyzer
-        </p>
-        <p style="color:#D8F3EF;margin-top:8px;">
-            Engineering • Statistics • Probability • Data Visualization
-        </p>
-    </div>
+    }}
+
+    .hero h1, .hero p {{
+        color: white !important;
+    }}
+
+    .hero h1 {{
+        margin: 0;
+        font-size: 2.1rem;
+    }}
+
+    .hero p {{
+        margin-bottom: 0;
+        font-size: 1rem;
+    }}
+
+    .carte {{
+        background-color: {C["panneau"]};
+        border: 1px solid {C["bordure"]};
+        padding: 17px;
+        border-radius: 12px;
+        min-height: 100px;
+    }}
+
+    .carte-titre {{
+        color: {C["secondaire"]} !important;
+        font-size: .9rem;
+    }}
+
+    .carte-valeur {{
+        color: {C["texte"]} !important;
+        font-size: 1.55rem;
+        font-weight: 750;
+    }}
+    </style>
     """,
     unsafe_allow_html=True
 )
 
+
+def afficher_carte(titre, valeur, unite=""):
+    st.markdown(
+        f"""
+        <div class="carte">
+            <div class="carte-titre">{titre}</div>
+            <div class="carte-valeur">{valeur} {unite}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
 # =========================================================
-# 9. MENU LATERAL
+# 8. TITRE ET NAVIGATION
 # =========================================================
+
+st.markdown("""
+<div class="hero">
+    <h1>🏗️ BetonLab</h1>
+    <p>Application d'analyse des essais de résistance à la compression du béton</p>
+    <p>Statistiques • Probabilités • Diagrammes • Historique</p>
+</div>
+""", unsafe_allow_html=True)
 
 with st.sidebar:
     st.title("BETONLAB")
-    st.caption("Concrete laboratory dashboard")
+    st.caption("Laboratoire numérique du béton")
 
     page = st.radio(
         "Navigation",
         [
-            "Dashboard",
-            "Add a test",
-            "Database",
-            "Statistics",
-            "Probability",
-            "Charts"
+            "Tableau de bord",
+            "Enregistrer un essai",
+            "Base des essais",
+            "Statistiques",
+            "Probabilités",
+            "Diagrammes",
+            "Historique d'utilisation"
         ]
     )
 
     st.divider()
+    st.caption("Version 2.0")
+    st.caption("Python • Streamlit • Plotly")
 
-    st.caption("Version 1.0")
-    st.caption("Python + Streamlit + Plotly")
+
+# Enregistrer une consultation seulement lors d'un changement
+# de page dans la session, afin d'éviter les doublons à chaque rerun.
+if st.session_state.get("derniere_page") != page:
+    st.session_state.derniere_page = page
+    enregistrer_action("Consultation d'une rubrique", page)
+
+df = charger_essais()
+s = calculer_statistiques(df)
 
 
 # =========================================================
-# 10. CHARGEMENT DES DONNEES
+# 9. TABLEAU DE BORD
 # =========================================================
 
-initialize_database()
-df = load_data()
+if page == "Tableau de bord":
 
-
-# =========================================================
-# 11. DASHBOARD
-# =========================================================
-
-if page == "Dashboard":
-
-    st.header("Dashboard")
+    st.header("📊 Vue d'ensemble du laboratoire")
+    st.write(
+        "Retrouvez les principaux indicateurs, les derniers essais "
+        "et les tendances de résistance de vos éprouvettes."
+    )
 
     if df.empty:
         st.info(
-            "No tests recorded yet. "
-            "Open 'Add a test' to enter your first result."
+            "Aucun essai enregistré. Ouvrez « Enregistrer un essai » "
+            "pour commencer à constituer votre base de données."
         )
+
+        a, b, c = st.columns(3)
+
+        with a:
+            st.subheader("🧪 Saisir")
+            st.write("Enregistrez les dimensions, l'âge et la charge de rupture.")
+
+        with b:
+            st.subheader("📈 Analyser")
+            st.write("Consultez les statistiques, les probabilités et les diagrammes.")
+
+        with c:
+            st.subheader("🗂️ Conserver")
+            st.write("Retrouvez les opérations dans l'historique d'utilisation.")
 
     else:
-        s = calculate_statistics(df)
-
         c1, c2, c3, c4 = st.columns(4)
 
-        c1.metric(
-            "Number of tests",
-            s["count"]
+        with c1:
+            afficher_carte("Nombre d'essais", str(s["nombre"]))
+
+        with c2:
+            afficher_carte(
+                "Résistance moyenne",
+                nombre_francais(s["moyenne"]), "MPa"
+            )
+
+        with c3:
+            afficher_carte(
+                "Résistance maximale",
+                nombre_francais(s["maximum"]), "MPa"
+            )
+
+        with c4:
+            afficher_carte(
+                "Résistance minimale",
+                nombre_francais(s["minimum"]), "MPa"
+            )
+
+        st.write("")
+
+        c5, c6, c7, c8 = st.columns(4)
+
+        with c5:
+            afficher_carte(
+                "Médiane",
+                nombre_francais(s["mediane"]), "MPa"
+            )
+
+        with c6:
+            afficher_carte(
+                "Étendue",
+                nombre_francais(s["etendue"]), "MPa"
+            )
+
+        with c7:
+            afficher_carte(
+                "Écart-type",
+                nombre_francais(s["ecart_type"]), "MPa"
+            )
+
+        with c8:
+            afficher_carte(
+                "Coefficient de variation",
+                nombre_francais(s["cv"]), "%"
+            )
+
+        st.write("")
+        gauche, droite = st.columns(2)
+
+        with gauche:
+            st.plotly_chart(
+                graphique_histogramme(df),
+                use_container_width=True
+            )
+
+        with droite:
+            if len(df) >= 2:
+                st.plotly_chart(
+                    graphique_evolution(df),
+                    use_container_width=True
+                )
+            else:
+                st.info(
+                    "Ajoutez plusieurs essais pour visualiser "
+                    "l'évolution de la résistance."
+                )
+
+        st.subheader("🧾 Derniers essais enregistrés")
+
+        derniers = df.head(8).copy()
+
+        derniers["test_date"] = (
+            derniers["test_date"].dt.strftime("%d/%m/%Y")
         )
 
-        c2.metric(
-            "Mean strength",
-            f'{s["mean"]:.2f} MPa'
-        )
+        derniers = derniers.rename(columns={
+            "id": "Identifiant",
+            "sample_code": "Code éprouvette",
+            "test_date": "Date",
+            "age_days": "Âge (jours)",
+            "load_kn": "Charge (kN)",
+            "strength_mpa": "Résistance (MPa)",
+            "shape": "Forme"
+        })
 
-        c3.metric(
-            "Maximum strength",
-            f'{s["maximum"]:.2f} MPa'
-        )
-
-        c4.metric(
-            "Minimum strength",
-            f'{s["minimum"]:.2f} MPa'
-        )
-
-        st.subheader("Recent tests")
+        colonnes = [
+            "Identifiant", "Code éprouvette", "Date",
+            "Âge (jours)", "Charge (kN)",
+            "Résistance (MPa)", "Forme"
+        ]
 
         st.dataframe(
-            df.head(10),
+            derniers[[c for c in colonnes if c in derniers.columns]],
             use_container_width=True,
             hide_index=True
         )
 
-        left, right = st.columns(2)
+        st.subheader("🧭 Aperçu des analyses")
 
-        with left:
-            st.plotly_chart(
-                histogram_chart(df),
-                use_container_width=True
+        a, b, c = st.columns(3)
+
+        with a:
+            st.markdown("**Statistiques descriptives**")
+            st.write(
+                "Moyenne, médiane, dispersion et coefficient de variation."
             )
 
-        with right:
-            st.plotly_chart(
-                time_chart(df),
-                use_container_width=True
+        with b:
+            st.markdown("**Probabilités**")
+            st.write(
+                "Estimation de la probabilité d'atteindre une résistance cible."
+            )
+
+        with c:
+            st.markdown("**Suivi des opérations**")
+            st.write(
+                "Historique des ajouts, suppressions, exports et consultations."
             )
 
 
 # =========================================================
-# 12. AJOUT D'UN ESSAI
+# 10. ENREGISTRER UN ESSAI
 # =========================================================
 
-elif page == "Add a test":
+elif page == "Enregistrer un essai":
 
-    st.header("Record a compression test")
+    st.header("🧪 Enregistrer un essai de compression")
 
-    with st.form("test_form", clear_on_submit=True):
+    st.write(
+        "Remplissez les informations de l'éprouvette. "
+        "La résistance sera calculée automatiquement."
+    )
 
-        c1, c2 = st.columns(2)
+    with st.form("formulaire_essai", clear_on_submit=True):
 
-        with c1:
+        col1, col2 = st.columns(2)
+
+        with col1:
             code = st.text_input(
-                "Sample code",
-                placeholder="B-001"
+                "Code de l'éprouvette *",
+                placeholder="Ex. BET-001"
             )
 
-            test_date = st.date_input(
-                "Test date",
-                value=date.today()
+            jour = st.date_input(
+                "Date de l'essai",
+                value=date.today(),
+                format="DD/MM/YYYY"
             )
 
             age = st.number_input(
-                "Concrete age (days)",
+                "Âge du béton (jours)",
                 min_value=1,
                 max_value=36500,
                 value=28
             )
 
-            length = st.number_input(
-                "Length (mm)",
-                min_value=0.1,
-                value=150.0
+            forme = st.selectbox(
+                "Forme de l'éprouvette",
+                ["Prismatique", "Cylindrique"]
             )
 
-        with c2:
-            width = st.number_input(
-                "Width (mm)",
-                min_value=0.1,
-                value=150.0
-            )
+        with col2:
+            if forme == "Cylindrique":
+                longueur = st.number_input(
+                    "Diamètre (mm)",
+                    min_value=0.1,
+                    value=150.0
+                )
 
-            height = st.number_input(
-                "Height (mm)",
+                largeur = longueur
+
+                st.caption(
+                    "Pour un cylindre, le calcul utilise la surface "
+                    "circulaire π × diamètre² / 4."
+                )
+
+            else:
+                longueur = st.number_input(
+                    "Longueur de la surface chargée (mm)",
+                    min_value=0.1,
+                    value=150.0
+                )
+
+                largeur = st.number_input(
+                    "Largeur de la surface chargée (mm)",
+                    min_value=0.1,
+                    value=150.0
+                )
+
+            hauteur = st.number_input(
+                "Hauteur de l'éprouvette (mm)",
                 min_value=0.1,
                 value=300.0
             )
 
-            load = st.number_input(
-                "Maximum load (kN)",
+            charge = st.number_input(
+                "Charge maximale de rupture (kN)",
                 min_value=0.1,
                 value=650.0
             )
 
-        submitted = st.form_submit_button(
-            "Save compression test",
+        envoyer = st.form_submit_button(
+            "Calculer et enregistrer",
             use_container_width=True
         )
 
-    if submitted:
-
+    if envoyer:
         if not code.strip():
-            st.error("Please enter a sample code.")
+            st.error("Veuillez saisir le code de l'éprouvette.")
 
         else:
-            strength = calculate_strength(
-                load,
-                length,
-                width
+            resistance = calculer_resistance(
+                charge, longueur, largeur, forme
             )
 
-            save_test(
+            sauvegarder_essai(
                 code.strip(),
-                test_date.isoformat(),
+                jour.isoformat(),
                 int(age),
-                float(length),
-                float(width),
-                float(height),
-                float(load),
-                float(strength)
+                float(longueur),
+                float(largeur),
+                float(hauteur),
+                float(charge),
+                float(resistance),
+                forme
             )
 
-            st.success("Test saved successfully.")
+            st.success("L'essai a été enregistré avec succès.")
 
             st.metric(
-                "Calculated compressive strength",
-                f"{strength:.2f} MPa"
+                "Résistance calculée",
+                f"{resistance:.2f} MPa"
             )
 
             st.info(
-                "Calculation: load (kN) × 1000 / "
-                "loaded area (mm²)."
+                "Pour une éprouvette prismatique : "
+                "résistance = charge (N) / surface (mm²). "
+                "Pour une éprouvette cylindrique, la surface est "
+                "π × diamètre² / 4."
             )
 
+            st.rerun()
+
 
 # =========================================================
-# 13. BASE DE DONNEES
+# 11. BASE DES ESSAIS
 # =========================================================
 
-elif page == "Database":
+elif page == "Base des essais":
 
-    st.header("Test database")
+    st.header("🗂️ Base de données des essais")
 
     if df.empty:
-        st.info("The database is empty.")
+        st.info("La base de données est vide.")
 
     else:
-        search = st.text_input(
-            "Search by sample code"
+        recherche = st.text_input(
+            "Rechercher par code d'éprouvette"
         )
 
-        view = df.copy()
+        vue = df.copy()
 
-        if search.strip():
-            view = view[
-                view["sample_code"].str.contains(
-                    search.strip(),
+        if recherche.strip():
+            vue = vue[
+                vue["sample_code"].str.contains(
+                    recherche.strip(),
                     case=False,
                     na=False
                 )
             ]
 
+        affichage = vue.rename(columns={
+            "id": "Identifiant",
+            "sample_code": "Code éprouvette",
+            "test_date": "Date de l'essai",
+            "age_days": "Âge (jours)",
+            "length_mm": "Longueur ou diamètre (mm)",
+            "width_mm": "Largeur (mm)",
+            "height_mm": "Hauteur (mm)",
+            "load_kn": "Charge (kN)",
+            "strength_mpa": "Résistance (MPa)",
+            "shape": "Forme"
+        })
+
+        if "Date de l'essai" in affichage.columns:
+            affichage["Date de l'essai"] = pd.to_datetime(
+                affichage["Date de l'essai"]
+            ).dt.strftime("%d/%m/%Y")
+
         st.dataframe(
-            view,
+            affichage,
             use_container_width=True,
             hide_index=True
         )
 
-        csv_data = view.to_csv(
+        csv_data = vue.to_csv(
             index=False
         ).encode("utf-8-sig")
 
-        st.download_button(
-            "Download results as CSV",
+        if st.download_button(
+            "⬇️ Exporter les résultats en CSV",
             data=csv_data,
-            file_name="betonlab_results.csv",
+            file_name="betonlab_essais.csv",
             mime="text/csv"
-        )
+        ):
+            enregistrer_action(
+                "Exportation des essais",
+                f"{len(vue)} enregistrement(s) exporté(s)"
+            )
 
-        st.warning(
-            "Deleting a record permanently removes it from "
-            "the current database."
-        )
+        st.divider()
+        st.subheader("Supprimer un essai")
 
-        selected_id = st.number_input(
-            "ID of the test to delete",
-            min_value=1,
-            step=1
-        )
+        identifiants = vue["id"].astype(int).tolist()
 
-        if st.button("Delete selected test"):
-
-            with sqlite3.connect(DB_PATH) as con:
-                cursor = con.execute(
-                    "DELETE FROM tests WHERE id = ?",
-                    (int(selected_id),)
+        if identifiants:
+            identifiant = st.selectbox(
+                "Choisir l'essai",
+                identifiants,
+                format_func=lambda i: (
+                    f"ID {i} — "
+                    f"{vue.loc[vue['id'] == i, 'sample_code'].iloc[0]}"
                 )
-                con.commit()
+            )
 
-            if cursor.rowcount:
-                load_data.clear()
-                st.success("Test deleted.")
-                st.rerun()
+            confirmation = st.checkbox(
+                "Je confirme vouloir supprimer définitivement cet essai."
+            )
 
-            else:
-                st.error("No test found with this ID.")
+            if st.button("Supprimer l'essai sélectionné"):
+                if confirmation:
+                    if supprimer_essai(int(identifiant)):
+                        st.success("L'essai a été supprimé.")
+                        st.rerun()
+                else:
+                    st.warning(
+                        "Veuillez confirmer la suppression avant de continuer."
+                    )
 
 
 # =========================================================
-# 14. STATISTIQUES
+# 12. STATISTIQUES
 # =========================================================
 
-elif page == "Statistics":
+elif page == "Statistiques":
 
-    st.header("Statistical analysis")
+    st.header("📊 Analyse statistique")
 
-    if df.empty:
-        st.info("Record some tests first.")
+    if s == {}:
+        st.info(
+            "Enregistrez des essais pour afficher les statistiques."
+        )
 
     else:
-        s = calculate_statistics(df)
+        colonnes = st.columns(4)
 
-        c1, c2, c3 = st.columns(3)
+        indicateurs = [
+            ("Nombre d'essais", str(s["nombre"])),
+            ("Moyenne", f'{s["moyenne"]:.2f} MPa'),
+            ("Médiane", f'{s["mediane"]:.2f} MPa'),
+            ("Étendue", f'{s["etendue"]:.2f} MPa')
+        ]
 
-        c1.metric(
-            "Mean",
-            f'{s["mean"]:.2f} MPa'
-        )
+        for col, (titre, valeur) in zip(colonnes, indicateurs):
+            with col:
+                st.metric(titre, valeur)
 
-        c2.metric(
-            "Median",
-            f'{s["median"]:.2f} MPa'
-        )
+        colonnes = st.columns(4)
 
-        c3.metric(
-            "Range",
-            f'{s["range"]:.2f} MPa'
-        )
+        indicateurs = [
+            (
+                "Minimum",
+                f'{s["minimum"]:.2f} MPa'
+            ),
+            (
+                "Maximum",
+                f'{s["maximum"]:.2f} MPa'
+            ),
+            (
+                "Écart-type",
+                f'{s["ecart_type"]:.2f} MPa'
+                if s["ecart_type"] is not None else "—"
+            ),
+            (
+                "Coefficient de variation",
+                f'{s["cv"]:.2f}%'
+                if s["cv"] is not None else "—"
+            )
+        ]
 
-        c1, c2, c3 = st.columns(3)
+        for col, (titre, valeur) in zip(colonnes, indicateurs):
+            with col:
+                st.metric(titre, valeur)
 
-        c1.metric(
-            "Standard deviation",
-            f'{s["std"]:.2f} MPa'
-            if s["std"] is not None else "N/A"
-        )
+        st.subheader("Tableau récapitulatif")
 
-        c2.metric(
-            "Coefficient of variation",
-            f'{s["cv"]:.2f}%'
-            if s["cv"] is not None else "N/A"
-        )
-
-        c3.metric(
-            "Number of tests",
-            s["count"]
-        )
-
-        st.subheader("Complete statistical table")
-
-        summary = pd.DataFrame({
-            "Statistic": [
-                "Count",
-                "Mean",
-                "Median",
+        resume = pd.DataFrame({
+            "Indicateur": [
+                "Nombre d'essais",
+                "Moyenne",
+                "Médiane",
                 "Minimum",
                 "Maximum",
-                "Range",
-                "Standard deviation",
-                "Coefficient of variation"
+                "Étendue",
+                "Écart-type",
+                "Coefficient de variation"
             ],
-            "Value": [
-                s["count"],
-                s["mean"],
-                s["median"],
+            "Valeur": [
+                s["nombre"],
+                s["moyenne"],
+                s["mediane"],
                 s["minimum"],
                 s["maximum"],
-                s["range"],
-                s["std"],
+                s["etendue"],
+                s["ecart_type"],
                 s["cv"]
             ]
         })
 
         st.dataframe(
-            summary,
+            resume,
             use_container_width=True,
             hide_index=True
         )
 
-        st.plotly_chart(
-            box_chart(df),
-            use_container_width=True
-        )
+        gauche, droite = st.columns(2)
 
-        if len(df) >= 3:
-            x = df["strength_mpa"].to_numpy(dtype=float)
+        with gauche:
+            st.plotly_chart(
+                graphique_boite(df),
+                use_container_width=True
+            )
 
-            if np.std(x) > 0:
-                statistic, p_value = stats.shapiro(x)
+        with droite:
+            st.plotly_chart(
+                graphique_histogramme(df),
+                use_container_width=True
+            )
 
-                st.subheader("Normality diagnostic")
-                st.write(
-                    f"Shapiro-Wilk statistic: {statistic:.4f}"
+        st.subheader("Test indicatif de normalité")
+
+        valeurs = df["strength_mpa"].dropna().to_numpy(dtype=float)
+
+        if len(valeurs) >= 3 and np.std(valeurs) > 0:
+            echantillon = (
+                valeurs if len(valeurs) <= 5000
+                else np.random.default_rng(42).choice(
+                    valeurs, size=5000, replace=False
                 )
-                st.write(
-                    f"P-value: {p_value:.4f}"
+            )
+
+            resultat = stats.shapiro(echantillon)
+
+            st.write(
+                f"Statistique de Shapiro-Wilk : "
+                f"**{resultat.statistic:.4f}**"
+            )
+
+            st.write(
+                f"Valeur p : **{resultat.pvalue:.4f}**"
+            )
+
+            if resultat.pvalue < 0.05:
+                st.warning(
+                    "Au seuil de 5 %, le test fournit des éléments "
+                    "contre l'hypothèse de normalité."
+                )
+            else:
+                st.info(
+                    "Au seuil de 5 %, le test ne permet pas de rejeter "
+                    "l'hypothèse de normalité. Cela ne prouve pas "
+                    "que les données suivent une loi normale."
                 )
 
-                st.caption(
-                    "A p-value below 0.05 is evidence against "
-                    "normality under this test. Results depend "
-                    "on sample size; this is not proof that a "
-                    "distribution is normal."
-                )
+        else:
+            st.info(
+                "Le test nécessite au moins trois valeurs et une "
+                "dispersion non nulle."
+            )
 
 
 # =========================================================
-# 15. PROBABILITES
+# 13. PROBABILITES
 # =========================================================
 
-elif page == "Probability":
+elif page == "Probabilités":
 
-    st.header("Probability analysis")
+    st.header("🎯 Analyse des probabilités")
 
     st.write(
-        "Estimate probabilities under a normal distribution "
-        "fitted to the recorded strengths."
+        "Cette rubrique estime les probabilités à partir d'un "
+        "modèle normal ajusté aux résistances observées."
     )
 
-    if len(df) < 2:
+    valeurs = df["strength_mpa"].dropna().to_numpy(dtype=float)
+
+    if len(valeurs) < 2:
         st.warning(
-            "At least two recorded tests are required."
+            "Enregistrez au moins deux essais pour calculer "
+            "les probabilités."
         )
 
     else:
-        x = df["strength_mpa"].to_numpy(dtype=float)
+        moyenne = float(np.mean(valeurs))
+        ecart_type = float(np.std(valeurs, ddof=1))
 
-        mean = float(np.mean(x))
-        sd = float(np.std(x, ddof=1))
+        c1, c2 = st.columns(2)
 
-        st.metric(
-            "Mean strength",
-            f"{mean:.2f} MPa"
-        )
+        with c1:
+            st.metric(
+                "Résistance moyenne",
+                f"{moyenne:.2f} MPa"
+            )
 
-        st.metric(
-            "Sample standard deviation",
-            f"{sd:.2f} MPa"
-        )
+        with c2:
+            st.metric(
+                "Écart-type",
+                f"{ecart_type:.2f} MPa"
+            )
 
-        target = st.number_input(
-            "Target strength (MPa)",
+        cible = st.number_input(
+            "Résistance cible (MPa)",
             min_value=0.0,
-            value=30.0,
-            step=1.0
+            value=float(round(moyenne, 1)),
+            step=0.5
         )
 
-        if sd == 0:
+        if ecart_type == 0:
             st.warning(
-                "All measured strengths are identical. "
-                "A fitted normal distribution cannot be "
-                "estimated with zero standard deviation."
+                "La dispersion est nulle. Un modèle normal avec "
+                "écart-type nul ne peut pas être ajusté."
             )
 
         else:
-            p_below = float(
+            p_inferieur = float(
                 stats.norm.cdf(
-                    target,
-                    loc=mean,
-                    scale=sd
+                    cible,
+                    loc=moyenne,
+                    scale=ecart_type
                 )
             )
 
-            p_above = 1.0 - p_below
+            p_superieur = 1 - p_inferieur
 
             c1, c2 = st.columns(2)
 
-            c1.metric(
-                f"P(X ≤ {target:.2f})",
-                f"{100 * p_below:.2f}%"
-            )
+            with c1:
+                st.metric(
+                    f"P(X ≤ {cible:.2f} MPa)",
+                    f"{p_inferieur * 100:.2f}%"
+                )
 
-            c2.metric(
-                f"P(X ≥ {target:.2f})",
-                f"{100 * p_above:.2f}%"
-            )
+            with c2:
+                st.metric(
+                    f"P(X ≥ {cible:.2f} MPa)",
+                    f"{p_superieur * 100:.2f}%"
+                )
+
+            couleurs = THEMES[st.session_state.theme_betonlab]
 
             xx = np.linspace(
-                min(float(np.min(x)), mean - 4 * sd),
-                max(float(np.max(x)), mean + 4 * sd),
+                min(0, moyenne - 4 * ecart_type),
+                moyenne + 4 * ecart_type,
                 400
             )
 
             yy = stats.norm.pdf(
                 xx,
-                loc=mean,
-                scale=sd
+                loc=moyenne,
+                scale=ecart_type
             )
 
             fig = go.Figure()
 
-            fig.add_trace(
-                go.Scatter(
-                    x=xx,
-                    y=yy,
-                    mode="lines",
-                    name="Normal density",
-                    line=dict(
-                        color=COLORS["secondary"],
-                        width=3
-                    )
+            fig.add_trace(go.Scatter(
+                x=xx,
+                y=yy,
+                mode="lines",
+                name="Densité normale",
+                line=dict(
+                    color=couleurs["primaire"],
+                    width=3
                 )
-            )
+            ))
 
-            mask = xx <= target
+            masque = xx <= cible
 
-            fig.add_trace(
-                go.Scatter(
-                    x=xx[mask],
-                    y=yy[mask],
-                    fill="tozeroy",
-                    mode="none",
-                    name="Below target",
-                    fillcolor="rgba(34,166,153,0.35)"
-                )
-            )
+            fig.add_trace(go.Scatter(
+                x=xx[masque],
+                y=yy[masque],
+                mode="lines",
+                fill="tozeroy",
+                name="Probabilité sous la cible",
+                line=dict(width=0),
+                fillcolor="rgba(34,166,153,0.35)"
+            ))
 
             fig.add_vline(
-                x=target,
+                x=cible,
                 line_dash="dash",
-                line_color=COLORS["danger"],
-                annotation_text="Target"
+                line_color=couleurs["danger"],
+                annotation_text="Résistance cible"
             )
 
             fig.update_layout(
-                xaxis_title="Strength (MPa)",
-                yaxis_title="Probability density"
+                xaxis_title="Résistance (MPa)",
+                yaxis_title="Densité de probabilité"
             )
 
             st.plotly_chart(
-                apply_chart_style(
+                appliquer_style_graphique(
                     fig,
-                    "Normal-model probability"
+                    "Distribution normale estimée"
                 ),
                 use_container_width=True
             )
 
-            st.caption(
-                "These are model-based estimates, not a guarantee "
-                "of concrete conformity. Interpret them using "
-                "the applicable testing standard and sufficient "
-                "representative observations."
+            st.warning(
+                "Ces probabilités sont des estimations fondées sur "
+                "un modèle normal. Elles ne garantissent pas la "
+                "conformité réglementaire du béton."
             )
 
 
 # =========================================================
-# 16. GRAPHIQUES
+# 14. DIAGRAMMES
 # =========================================================
 
-elif page == "Charts":
+elif page == "Diagrammes":
 
-    st.header("Interactive charts")
+    st.header("📈 Galerie de diagrammes")
 
     if df.empty:
-        st.info("Record tests to create charts.")
+        st.info(
+            "Enregistrez des essais pour générer les diagrammes."
+        )
 
     else:
-        chart_choice = st.selectbox(
-            "Choose a chart",
+        choix = st.selectbox(
+            "Choisir le diagramme à afficher",
             [
-                "Strength histogram",
-                "Strength over time",
-                "Box plot",
-                "Normal distribution"
+                "Histogramme des résistances",
+                "Évolution dans le temps",
+                "Boîte à moustaches",
+                "Distribution normale",
+                "Résistance en fonction de l'âge"
             ]
         )
 
-        if chart_choice == "Strength histogram":
-            fig = histogram_chart(df)
+        if choix == "Histogramme des résistances":
+            fig = graphique_histogramme(df)
 
-        elif chart_choice == "Strength over time":
-            fig = time_chart(df)
+        elif choix == "Évolution dans le temps":
+            fig = graphique_evolution(df)
 
-        elif chart_choice == "Box plot":
-            fig = box_chart(df)
+        elif choix == "Boîte à moustaches":
+            fig = graphique_boite(df)
+
+        elif choix == "Distribution normale":
+            fig = graphique_normale(df)
 
         else:
-            fig = normal_chart(df)
+            fig = px.scatter(
+                df,
+                x="age_days",
+                y="strength_mpa",
+                color="sample_code",
+                hover_data=["test_date"],
+                labels={
+                    "age_days": "Âge du béton (jours)",
+                    "strength_mpa": "Résistance (MPa)",
+                    "sample_code": "Éprouvette"
+                }
+            )
+
+            fig = appliquer_style_graphique(
+                fig,
+                "Résistance en fonction de l'âge du béton"
+            )
 
         st.plotly_chart(
             fig,
             use_container_width=True
         )
 
-        st.download_button(
-            "Download chart data as CSV",
+        if st.download_button(
+            "⬇️ Exporter les données des diagrammes",
             data=df.to_csv(index=False).encode("utf-8-sig"),
-            file_name="betonlab_chart_data.csv",
+            file_name="betonlab_donnees_graphiques.csv",
             mime="text/csv"
-        )
+        ):
+            enregistrer_action(
+                "Exportation des données des diagrammes",
+                f"{len(df)} essai(s)"
+            )
 
 
 # =========================================================
-# 17. PIED DE PAGE
+# 15. HISTORIQUE D'UTILISATION
+# =========================================================
+
+elif page == "Historique d'utilisation":
+
+    st.header("🕒 Historique d'utilisation")
+
+    st.write(
+        "Consultez les actions enregistrées par l'application : "
+        "ajouts, suppressions, consultations et exportations."
+    )
+
+    historique = charger_historique()
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.metric(
+            "Actions enregistrées",
+            len(historique)
+        )
+
+    with c2:
+        st.metric(
+            "Essais dans la base",
+            len(df)
+        )
+
+    with c3:
+        st.metric(
+            "Rubrique actuelle",
+            "Historique"
+        )
+
+    if historique.empty:
+        st.info("Aucune action n'a encore été enregistrée.")
+
+    else:
+        actions = sorted(
+            historique["Action"].dropna().unique().tolist()
+        )
+
+        filtre = st.selectbox(
+            "Filtrer les actions",
+            ["Toutes les actions"] + actions
+        )
+
+        historique_vue = historique.copy()
+
+        if filtre != "Toutes les actions":
+            historique_vue = historique_vue[
+                historique_vue["Action"] == filtre
+            ]
+
+        st.dataframe(
+            historique_vue,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        if st.download_button(
+            "⬇️ Exporter l'historique en CSV",
+            data=historique_vue.to_csv(
+                index=False
+            ).encode("utf-8-sig"),
+            file_name="betonlab_historique.csv",
+            mime="text/csv"
+        ):
+            enregistrer_action(
+                "Exportation de l'historique",
+                f"{len(historique_vue)} action(s) exportée(s)"
+            )
+
+
+# =========================================================
+# 16. PIED DE PAGE
 # =========================================================
 
 st.divider()
 
 st.caption(
-    "BetonLab | Concrete Compression Test Analyzer | "
-    "Statistical estimates should be interpreted with "
-    "the applicable engineering standards."
+    f"BetonLab • Analyse du béton • "
+    f"Thème : {st.session_state.theme_betonlab} • "
+    "Résistance exprimée en MPa"
 )
