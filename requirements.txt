@@ -3,3 +3,4 @@ pandas
 datetime
 plotly
 scipy
+sqlalchemy
