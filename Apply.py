@@ -581,7 +581,7 @@ def graphique_boite(df):
 # 6. BARRE LATÉRALE
 # =========================================================
 with st.sidebar:
-    st.title("🏗️ BetonLab")
+    st.title("🏗️ BetonControl")
     langue = st.selectbox(T("language"), ["Français", "English"],
                           index=0 if st.session_state.lang == "Français" else 1)
     if langue != st.session_state.lang:
