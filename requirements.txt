@@ -4,3 +4,4 @@ datetime
 plotly
 scipy
 sqlalchemy
+matplotlib
