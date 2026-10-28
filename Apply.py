@@ -665,7 +665,7 @@ elif page == "Probabilités":
     st.metric("Écart-type", f"{sd:.2f} MPa")
 
     if sd <= 0:
-[28/10/2026 17:59] Donatella: st.warning(
+        Donatella: st.warning(
             "L'écart-type est nul. "
             "La distribution normale n'est pas exploitable."
         )
