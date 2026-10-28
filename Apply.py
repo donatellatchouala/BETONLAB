@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 # 1. CONFIGURATION
 # =========================================================
 st.set_page_config(
-    page_title="BetonLab",
+    page_title="BetonControl",
     page_icon="🏗️",
     layout="wide",
     initial_sidebar_state="expanded",
