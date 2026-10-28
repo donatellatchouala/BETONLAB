@@ -182,7 +182,7 @@ engine = connect_database()
 # ============================================================
 # 5. CRÉATION DE LA BASE DE DONNÉES
 # ============================================================
-[28/10/2026 17:59] Donatella: def init_database():
+def init_database():
 
     with engine.begin() as connection:
 
