@@ -494,7 +494,7 @@ elif page == "Enregistrer un essai":
                 raise ValueError(
                     "Le code de l'éprouvette est obligatoire."
                 )
-area = calculate_area(
+                area = calculate_area(
                 specimen_type,
                 diameter or 0,
                 length or 0,
