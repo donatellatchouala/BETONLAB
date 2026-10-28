@@ -864,7 +864,7 @@ elif page == T("charts"):
             fig = style_graphique(fig, T("age_chart"))
         st.plotly_chart(fig, use_container_width=True)
         st.download_button(T("export"), data=df.to_csv(index=False).encode("utf-8-sig"),
-                           file_name="betonlab_donnees_graphiques.csv", mime="text/csv")
+                           file_name="betonControl_donnees_graphiques.csv", mime="text/csv")
 
 # =========================================================
 # 13. HISTORIQUE
@@ -895,7 +895,7 @@ if st.session_state.get("afficher_donnees_stockees", False):
         st.download_button(
             T("backup_csv"),
             data=donnees_stockees.to_csv(index=False).encode("utf-8-sig"),
-            file_name="betonlab_sauvegarde.csv",
+            file_name="betonControl_sauvegarde.csv",
             mime="text/csv",
             key="download_backup_saved_data",
         )
@@ -904,4 +904,4 @@ if st.session_state.get("afficher_donnees_stockees", False):
 # 15. PIED DE PAGE
 # =========================================================
 st.divider()
-st.caption(f"BetonLab • {T('title')} • Storage: {MODE_STOCKAGE} • Theme: {st.session_state.theme}")
+st.caption(f"BetonControl • {T('title')} • Storage: {MODE_STOCKAGE} • Theme: {st.session_state.theme}")
