@@ -1,5 +1,3 @@
-BetonLab — Analyse des essais de résistance du béton
-
 import os
 import sqlite3
 from datetime import date, datetime
