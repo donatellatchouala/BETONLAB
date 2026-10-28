@@ -842,7 +842,7 @@ elif page == "Paramètres":
     st.divider()
 
     st.subheader("Suppression de tous les essais")
-[28/10/2026 17:59] Donatella: st.warning(
+    Donatella: st.warning(
         "Cette opération est irréversible si aucune sauvegarde "
         "n'a été réalisée. Elle supprime les essais de la base."
     )
