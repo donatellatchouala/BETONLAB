@@ -612,7 +612,7 @@ with st.sidebar:
 
 st.markdown(f"""
 <div class="hero">
-  <h1>🏗️ BetonLab</h1>
+  <h1>🏗️ BetonControl</h1>
   <p>{T("title")}</p>
   <p>{T("footer")}</p>
 </div>
