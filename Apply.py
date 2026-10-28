@@ -37,7 +37,7 @@ THEMES = {
         "accent": "#087F8C",
         "bordure": "#D9E2EF",
         "danger": "#D64545",
-        "graphique": "plotly_white",
+        "graphique": "plotly_white"
     },
     "Sombre": {
         "fond": "#000000",
@@ -48,7 +48,7 @@ THEMES = {
         "accent": "#38D6C5",
         "bordure": "#444444",
         "danger": "#FF7070",
-        "graphique": "plotly_dark",
+        "graphique": "plotly_dark"
     }
 }
 
@@ -56,28 +56,107 @@ if "theme_betonlab" not in st.session_state:
     st.session_state.theme_betonlab = "Clair"
 
 # =========================================================
-# 3. BASE DE DONNEES
+# 3. BASE DE DONNEES ET MIGRATION
 # =========================================================
 
 def connexion():
     return sqlite3.connect(DB_PATH, timeout=15)
 
 
+def enregistrer_action(action, details=""):
+    with connexion() as con:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS historique (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date_heure TEXT NOT NULL,
+                action TEXT NOT NULL,
+                details TEXT DEFAULT ''
+            )
+        """)
+
+        con.execute("""
+            INSERT INTO historique(date_heure, action, details)
+            VALUES (?, ?, ?)
+        """, (
+            datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+            action,
+            details
+        ))
+
+
 def initialiser_base():
+    """Crée la base et adapte les anciennes versions sans effacer les essais."""
+
     with connexion() as con:
         con.execute("""
             CREATE TABLE IF NOT EXISTS tests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                sample_code TEXT NOT NULL,
-                test_date TEXT NOT NULL,
-                age_days INTEGER NOT NULL,
-                length_mm REAL NOT NULL,
-                width_mm REAL NOT NULL,
-                height_mm REAL NOT NULL,
-                load_kn REAL NOT NULL,
-                strength_mpa REAL NOT NULL
+                sample_code TEXT DEFAULT '',
+                test_date TEXT DEFAULT '2000-01-01',
+                age_days INTEGER DEFAULT 28,
+                length_mm REAL DEFAULT 150,
+                width_mm REAL DEFAULT 150,
+                height_mm REAL DEFAULT 300,
+                load_kn REAL DEFAULT 1,
+                strength_mpa REAL DEFAULT 0,
+                shape TEXT DEFAULT 'Prismatique'
             )
         """)
+
+        # Colonnes réellement présentes dans la base
+        colonnes = {
+            ligne[1]
+            for ligne in con.execute(
+                "PRAGMA table_info(tests)"
+            ).fetchall()
+        }
+
+        # Ajouter les colonnes manquantes dans les anciennes bases.
+        # Les valeurs par défaut permettent de conserver les anciennes lignes.
+        colonnes_a_ajouter = {
+            "sample_code": "TEXT DEFAULT ''",
+            "test_date": "TEXT DEFAULT '2000-01-01'",
+            "age_days": "INTEGER DEFAULT 28",
+            "length_mm": "REAL DEFAULT 150",
+            "width_mm": "REAL DEFAULT 150",
+            "height_mm": "REAL DEFAULT 300",
+            "load_kn": "REAL DEFAULT 1",
+            "strength_mpa": "REAL DEFAULT 0",
+            "shape": "TEXT DEFAULT 'Prismatique'"
+        }
+
+        for nom, definition in colonnes_a_ajouter.items():
+            if nom not in colonnes:
+                con.execute(
+                    f"ALTER TABLE tests ADD COLUMN {nom} {definition}"
+                )
+
+        # Relire la structure après les ajouts
+        colonnes = {
+            ligne[1]
+            for ligne in con.execute(
+                "PRAGMA table_info(tests)"
+            ).fetchall()
+        }
+
+        # Récupérer les valeurs d'anciennes versions utilisant
+        # charge, resistance et forme au lieu des noms actuels.
+        correspondances = {
+            "load_kn": ["charge", "charge_kn"],
+            "strength_mpa": ["resistance", "resistance_mpa"],
+            "shape": ["forme"]
+        }
+
+        for nouvelle, anciennes in correspondances.items():
+            for ancienne in anciennes:
+                if ancienne in colonnes:
+                    con.execute(
+                        f"""
+                        UPDATE tests
+                        SET {nouvelle} = {ancienne}
+                        WHERE {ancienne} IS NOT NULL
+                        """
+                    )
 
         con.execute("""
             CREATE INDEX IF NOT EXISTS idx_tests_date
@@ -93,42 +172,17 @@ def initialiser_base():
             )
         """)
 
-        # Migration pour les anciennes bases BetonLab.
-        # La nouvelle colonne conserve la forme de l'éprouvette.
-        colonnes = [
-            ligne[1]
-            for ligne in con.execute(
-                "PRAGMA table_info(tests)"
-            ).fetchall()
-        ]
-
-        if "shape" not in colonnes:
-            con.execute("""
-                ALTER TABLE tests
-                ADD COLUMN shape TEXT DEFAULT 'Prismatique'
-            """)
-
         con.commit()
 
 
-def enregistrer_action(action, details=""):
-    with connexion() as con:
-        con.execute("""
-            INSERT INTO historique(date_heure, action, details)
-            VALUES (?, ?, ?)
-        """, (
-            datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-            action,
-            details
-        ))
-
-
-@st.cache_data(ttl=20, show_spinner=False)
 def charger_essais():
     with connexion() as con:
         df = pd.read_sql_query(
             """
-            SELECT * FROM tests
+            SELECT id, sample_code, test_date, age_days,
+                   length_mm, width_mm, height_mm,
+                   load_kn, strength_mpa, shape
+            FROM tests
             ORDER BY test_date DESC, id DESC
             """,
             con
@@ -136,8 +190,7 @@ def charger_essais():
 
     if not df.empty:
         df["test_date"] = pd.to_datetime(
-            df["test_date"],
-            errors="coerce"
+            df["test_date"], errors="coerce"
         )
 
     return df
@@ -159,42 +212,73 @@ def sauvegarder_essai(
     code, jour, age, longueur, largeur, hauteur,
     charge, resistance, forme
 ):
-    with connexion() as con:
-        con.execute("""
-            INSERT INTO tests (
-                sample_code, test_date, age_days,
-                length_mm, width_mm, height_mm,
-                load_kn, strength_mpa, shape
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            code, jour, age, longueur, largeur, hauteur,
-            charge, resistance, forme
-        ))
+    """Enregistre un essai après vérification des colonnes."""
 
-    charger_essais.clear()
+    try:
+        with connexion() as con:
+            colonnes = {
+                ligne[1]
+                for ligne in con.execute(
+                    "PRAGMA table_info(tests)"
+                ).fetchall()
+            }
 
-    enregistrer_action(
-        "Ajout d'un essai",
-        f"Éprouvette {code} — résistance : {resistance:.2f} MPa"
-    )
+            necessaires = {
+                "sample_code", "test_date", "age_days",
+                "length_mm", "width_mm", "height_mm",
+                "load_kn", "strength_mpa", "shape"
+            }
+
+            manquantes = necessaires - colonnes
+
+            if manquantes:
+                raise sqlite3.OperationalError(
+                    "Colonnes manquantes : "
+                    + ", ".join(sorted(manquantes))
+                    + ". Relancez l'initialisation de la base."
+                )
+
+            con.execute("""
+                INSERT INTO tests (
+                    sample_code, test_date, age_days,
+                    length_mm, width_mm, height_mm,
+                    load_kn, strength_mpa, shape
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                code, jour, int(age),
+                float(longueur), float(largeur), float(hauteur),
+                float(charge), float(resistance), forme
+            ))
+
+            con.commit()
+
+        enregistrer_action(
+            "Ajout d'un essai",
+            f"Éprouvette {code} — résistance : {resistance:.2f} MPa"
+        )
+        return True
+
+    except sqlite3.Error as erreur:
+        st.error(f"Erreur de base de données : {erreur}")
+        return False
 
 
 def supprimer_essai(identifiant):
     with connexion() as con:
         ligne = con.execute(
             "SELECT sample_code FROM tests WHERE id = ?",
-            (identifiant,)
+            (int(identifiant),)
         ).fetchone()
 
         if ligne:
             con.execute(
                 "DELETE FROM tests WHERE id = ?",
-                (identifiant,)
+                (int(identifiant),)
             )
+            con.commit()
 
     if ligne:
-        charger_essais.clear()
         enregistrer_action(
             "Suppression d'un essai",
             f"Identifiant {identifiant} — éprouvette {ligne[0]}"
@@ -211,9 +295,8 @@ initialiser_base()
 
 def calculer_resistance(charge_kn, longueur_mm, largeur_mm, forme):
     """
-    La charge est exprimée en kN.
-    Les dimensions sont exprimées en mm.
-    La résistance obtenue est exprimée en MPa.
+    Charge en kN, dimensions en mm, résultat en MPa.
+    Pour un cylindre, longueur_mm représente le diamètre.
     """
 
     if charge_kn <= 0:
@@ -235,7 +318,9 @@ def calculer_resistance(charge_kn, longueur_mm, largeur_mm, forme):
 # =========================================================
 
 def calculer_statistiques(df):
-    x = df["strength_mpa"].dropna().to_numpy(dtype=float)
+    x = pd.to_numeric(
+        df["strength_mpa"], errors="coerce"
+    ).dropna().to_numpy(dtype=float)
 
     if len(x) == 0:
         return {}
@@ -302,16 +387,13 @@ def appliquer_style_graphique(fig, titre):
 
 def graphique_histogramme(df):
     couleurs = THEMES[st.session_state.theme_betonlab]
+    x = df["strength_mpa"].dropna()
 
     fig = px.histogram(
-        df,
-        x="strength_mpa",
-        nbins=max(5, min(20, len(df))),
+        x=x,
+        nbins=max(5, min(20, len(x))),
         color_discrete_sequence=[couleurs["accent"]],
-        labels={
-            "strength_mpa": "Résistance (MPa)",
-            "count": "Nombre d'essais"
-        }
+        labels={"value": "Résistance (MPa)", "count": "Nombre d'essais"}
     )
 
     fig.update_traces(
@@ -320,14 +402,12 @@ def graphique_histogramme(df):
     )
 
     return appliquer_style_graphique(
-        fig,
-        "Répartition des résistances"
+        fig, "Répartition des résistances"
     )
 
 
 def graphique_evolution(df):
     couleurs = THEMES[st.session_state.theme_betonlab]
-
     ordre = df.sort_values("test_date").copy()
 
     fig = px.line(
@@ -344,8 +424,7 @@ def graphique_evolution(df):
     )
 
     return appliquer_style_graphique(
-        fig,
-        "Évolution de la résistance dans le temps"
+        fig, "Évolution de la résistance dans le temps"
     )
 
 
@@ -357,14 +436,11 @@ def graphique_boite(df):
         y="strength_mpa",
         points="all",
         color_discrete_sequence=[couleurs["accent"]],
-        labels={
-            "strength_mpa": "Résistance (MPa)"
-        }
+        labels={"strength_mpa": "Résistance (MPa)"}
     )
 
     return appliquer_style_graphique(
-        fig,
-        "Dispersion des résistances"
+        fig, "Dispersion des résistances"
     )
 
 
@@ -393,20 +469,15 @@ def graphique_normale(df):
                 float(np.max(x)) + ecart_type,
                 300
             )
-
             yy = stats.norm.pdf(
                 xx, loc=moyenne, scale=ecart_type
             )
 
             fig.add_trace(go.Scatter(
-                x=xx,
-                y=yy,
+                x=xx, y=yy,
                 mode="lines",
                 name="Modèle normal",
-                line=dict(
-                    color=couleurs["accent"],
-                    width=3
-                )
+                line=dict(color=couleurs["accent"], width=3)
             ))
 
     fig.update_layout(
@@ -415,13 +486,12 @@ def graphique_normale(df):
     )
 
     return appliquer_style_graphique(
-        fig,
-        "Résultats observés et modèle normal"
+        fig, "Résultats observés et modèle normal"
     )
 
 
 # =========================================================
-# 7. APPARENCE DE L'APPLICATION
+# 7. APPARENCE ET PARAMETRES
 # =========================================================
 
 with st.sidebar:
@@ -474,7 +544,6 @@ st.markdown(
     div.stButton > button,
     div.stDownloadButton > button {{
         border-radius: 9px;
-        border: 1px solid {C["bordure"]};
         font-weight: 600;
     }}
 
@@ -544,7 +613,7 @@ def afficher_carte(titre, valeur, unite=""):
 st.markdown("""
 <div class="hero">
     <h1>🏗️ BetonLab</h1>
-    <p>Application d'analyse des essais de résistance à la compression du béton</p>
+    <p>Analyse des essais de résistance à la compression du béton</p>
     <p>Statistiques • Probabilités • Diagrammes • Historique</p>
 </div>
 """, unsafe_allow_html=True)
@@ -567,12 +636,9 @@ with st.sidebar:
     )
 
     st.divider()
-    st.caption("Version 2.0")
+    st.caption("Version 2.1")
     st.caption("Python • Streamlit • Plotly")
 
-
-# Enregistrer une consultation seulement lors d'un changement
-# de page dans la session, afin d'éviter les doublons à chaque rerun.
 if st.session_state.get("derniere_page") != page:
     st.session_state.derniere_page = page
     enregistrer_action("Consultation d'une rubrique", page)
@@ -586,86 +652,58 @@ s = calculer_statistiques(df)
 # =========================================================
 
 if page == "Tableau de bord":
-
     st.header("📊 Vue d'ensemble du laboratoire")
+
     st.write(
-        "Retrouvez les principaux indicateurs, les derniers essais "
-        "et les tendances de résistance de vos éprouvettes."
+        "Retrouvez les indicateurs, les derniers essais "
+        "et les tendances de résistance."
     )
 
     if df.empty:
         st.info(
             "Aucun essai enregistré. Ouvrez « Enregistrer un essai » "
-            "pour commencer à constituer votre base de données."
+            "pour commencer."
         )
 
         a, b, c = st.columns(3)
 
         with a:
             st.subheader("🧪 Saisir")
-            st.write("Enregistrez les dimensions, l'âge et la charge de rupture.")
+            st.write("Enregistrez les dimensions, l'âge et la charge.")
 
         with b:
             st.subheader("📈 Analyser")
-            st.write("Consultez les statistiques, les probabilités et les diagrammes.")
+            st.write("Consultez les statistiques et les diagrammes.")
 
         with c:
             st.subheader("🗂️ Conserver")
-            st.write("Retrouvez les opérations dans l'historique d'utilisation.")
+            st.write("Retrouvez les opérations dans l'historique.")
 
     else:
         c1, c2, c3, c4 = st.columns(4)
 
         with c1:
             afficher_carte("Nombre d'essais", str(s["nombre"]))
-
         with c2:
-            afficher_carte(
-                "Résistance moyenne",
-                nombre_francais(s["moyenne"]), "MPa"
-            )
-
+            afficher_carte("Résistance moyenne", nombre_francais(s["moyenne"]), "MPa")
         with c3:
-            afficher_carte(
-                "Résistance maximale",
-                nombre_francais(s["maximum"]), "MPa"
-            )
-
+            afficher_carte("Résistance maximale", nombre_francais(s["maximum"]), "MPa")
         with c4:
-            afficher_carte(
-                "Résistance minimale",
-                nombre_francais(s["minimum"]), "MPa"
-            )
+            afficher_carte("Résistance minimale", nombre_francais(s["minimum"]), "MPa")
 
         st.write("")
 
         c5, c6, c7, c8 = st.columns(4)
 
         with c5:
-            afficher_carte(
-                "Médiane",
-                nombre_francais(s["mediane"]), "MPa"
-            )
-
+            afficher_carte("Médiane", nombre_francais(s["mediane"]), "MPa")
         with c6:
-            afficher_carte(
-                "Étendue",
-                nombre_francais(s["etendue"]), "MPa"
-            )
-
+            afficher_carte("Étendue", nombre_francais(s["etendue"]), "MPa")
         with c7:
-            afficher_carte(
-                "Écart-type",
-                nombre_francais(s["ecart_type"]), "MPa"
-            )
-
+            afficher_carte("Écart-type", nombre_francais(s["ecart_type"]), "MPa")
         with c8:
-            afficher_carte(
-                "Coefficient de variation",
-                nombre_francais(s["cv"]), "%"
-            )
+            afficher_carte("Coefficient de variation", nombre_francais(s["cv"]), "%")
 
-        st.write("")
         gauche, droite = st.columns(2)
 
         with gauche:
@@ -681,18 +719,12 @@ if page == "Tableau de bord":
                     use_container_width=True
                 )
             else:
-                st.info(
-                    "Ajoutez plusieurs essais pour visualiser "
-                    "l'évolution de la résistance."
-                )
+                st.info("Ajoutez plusieurs essais pour visualiser l'évolution.")
 
         st.subheader("🧾 Derniers essais enregistrés")
 
         derniers = df.head(8).copy()
-
-        derniers["test_date"] = (
-            derniers["test_date"].dt.strftime("%d/%m/%Y")
-        )
+        derniers["test_date"] = derniers["test_date"].dt.strftime("%d/%m/%Y")
 
         derniers = derniers.rename(columns={
             "id": "Identifiant",
@@ -716,151 +748,67 @@ if page == "Tableau de bord":
             hide_index=True
         )
 
-        st.subheader("🧭 Aperçu des analyses")
-
-        a, b, c = st.columns(3)
-
-        with a:
-            st.markdown("**Statistiques descriptives**")
-            st.write(
-                "Moyenne, médiane, dispersion et coefficient de variation."
-            )
-
-        with b:
-            st.markdown("**Probabilités**")
-            st.write(
-                "Estimation de la probabilité d'atteindre une résistance cible."
-            )
-
-        with c:
-            st.markdown("**Suivi des opérations**")
-            st.write(
-                "Historique des ajouts, suppressions, exports et consultations."
-            )
-
 
 # =========================================================
 # 10. ENREGISTRER UN ESSAI
 # =========================================================
 
 elif page == "Enregistrer un essai":
-
     st.header("🧪 Enregistrer un essai de compression")
 
-    st.write(
-        "Remplissez les informations de l'éprouvette. "
-        "La résistance sera calculée automatiquement."
-    )
-
     with st.form("formulaire_essai", clear_on_submit=True):
-
         col1, col2 = st.columns(2)
 
         with col1:
-            code = st.text_input(
-                "Code de l'éprouvette *",
-                placeholder="Ex. BET-001"
-            )
-
-            jour = st.date_input(
-                "Date de l'essai",
-                value=date.today(),
-                format="DD/MM/YYYY"
-            )
-
-            age = st.number_input(
-                "Âge du béton (jours)",
-                min_value=1,
-                max_value=36500,
-                value=28
-            )
-
-            forme = st.selectbox(
-                "Forme de l'éprouvette",
-                ["Prismatique", "Cylindrique"]
-            )
+            code = st.text_input("Code de l'éprouvette *", placeholder="Ex. BET-001")
+            jour = st.date_input("Date de l'essai", value=date.today(), format="DD/MM/YYYY")
+            age = st.number_input("Âge du béton (jours)", min_value=1, max_value=36500, value=28)
+            forme = st.selectbox("Forme de l'éprouvette", ["Prismatique", "Cylindrique"])
 
         with col2:
             if forme == "Cylindrique":
-                longueur = st.number_input(
-                    "Diamètre (mm)",
-                    min_value=0.1,
-                    value=150.0
-                )
-
+                longueur = st.number_input("Diamètre (mm)", min_value=0.1, value=150.0)
                 largeur = longueur
-
-                st.caption(
-                    "Pour un cylindre, le calcul utilise la surface "
-                    "circulaire π × diamètre² / 4."
-                )
-
+                st.caption("Surface chargée : π × diamètre² / 4.")
             else:
-                longueur = st.number_input(
-                    "Longueur de la surface chargée (mm)",
-                    min_value=0.1,
-                    value=150.0
-                )
+                longueur = st.number_input("Longueur de la surface chargée (mm)", min_value=0.1, value=150.0)
+                largeur = st.number_input("Largeur de la surface chargée (mm)", min_value=0.1, value=150.0)
 
-                largeur = st.number_input(
-                    "Largeur de la surface chargée (mm)",
-                    min_value=0.1,
-                    value=150.0
-                )
+            hauteur = st.number_input("Hauteur de l'éprouvette (mm)", min_value=0.1, value=300.0)
+            charge = st.number_input("Charge maximale de rupture (kN)", min_value=0.1, value=650.0)
 
-            hauteur = st.number_input(
-                "Hauteur de l'éprouvette (mm)",
-                min_value=0.1,
-                value=300.0
-            )
-
-            charge = st.number_input(
-                "Charge maximale de rupture (kN)",
-                min_value=0.1,
-                value=650.0
-            )
-
-        envoyer = st.form_submit_button(
-            "Calculer et enregistrer",
-            use_container_width=True
-        )
+        envoyer = st.form_submit_button("Calculer et enregistrer", use_container_width=True)
 
     if envoyer:
         if not code.strip():
             st.error("Veuillez saisir le code de l'éprouvette.")
-
         else:
-            resistance = calculer_resistance(
-                charge, longueur, largeur, forme
-            )
+            try:
+                resistance = calculer_resistance(charge, longueur, largeur, forme)
 
-            sauvegarder_essai(
-                code.strip(),
-                jour.isoformat(),
-                int(age),
-                float(longueur),
-                float(largeur),
-                float(hauteur),
-                float(charge),
-                float(resistance),
-                forme
-            )
+                succes = sauvegarder_essai(
+                    code.strip(),
+                    jour.isoformat(),
+                    int(age),
+                    float(longueur),
+                    float(largeur),
+                    float(hauteur),
+                    float(charge),
+                    float(resistance),
+                    forme
+                )
 
-            st.success("L'essai a été enregistré avec succès.")
+                if succes:
+                    st.success("L'essai a été enregistré avec succès.")
+                    st.metric("Résistance calculée", f"{resistance:.2f} MPa")
+                    st.info(
+                        "Résistance = charge (N) / surface chargée (mm²). "
+                        "1 MPa = 1 N/mm²."
+                    )
+                    st.rerun()
 
-            st.metric(
-                "Résistance calculée",
-                f"{resistance:.2f} MPa"
-            )
-
-            st.info(
-                "Pour une éprouvette prismatique : "
-                "résistance = charge (N) / surface (mm²). "
-                "Pour une éprouvette cylindrique, la surface est "
-                "π × diamètre² / 4."
-            )
-
-            st.rerun()
+            except ValueError as erreur:
+                st.error(str(erreur))
 
 
 # =========================================================
@@ -868,25 +816,18 @@ elif page == "Enregistrer un essai":
 # =========================================================
 
 elif page == "Base des essais":
-
     st.header("🗂️ Base de données des essais")
 
     if df.empty:
         st.info("La base de données est vide.")
-
     else:
-        recherche = st.text_input(
-            "Rechercher par code d'éprouvette"
-        )
-
+        recherche = st.text_input("Rechercher par code d'éprouvette")
         vue = df.copy()
 
         if recherche.strip():
             vue = vue[
-                vue["sample_code"].str.contains(
-                    recherche.strip(),
-                    case=False,
-                    na=False
+                vue["sample_code"].astype(str).str.contains(
+                    recherche.strip(), case=False, na=False
                 )
             ]
 
@@ -903,31 +844,22 @@ elif page == "Base des essais":
             "shape": "Forme"
         })
 
-        if "Date de l'essai" in affichage.columns:
-            affichage["Date de l'essai"] = pd.to_datetime(
-                affichage["Date de l'essai"]
-            ).dt.strftime("%d/%m/%Y")
+        affichage["Date de l'essai"] = pd.to_datetime(
+            affichage["Date de l'essai"], errors="coerce"
+        ).dt.strftime("%d/%m/%Y")
 
-        st.dataframe(
-            affichage,
-            use_container_width=True,
-            hide_index=True
-        )
+        st.dataframe(affichage, use_container_width=True, hide_index=True)
 
-        csv_data = vue.to_csv(
-            index=False
-        ).encode("utf-8-sig")
-
-        if st.download_button(
+        st.download_button(
             "⬇️ Exporter les résultats en CSV",
-            data=csv_data,
+            data=vue.to_csv(index=False).encode("utf-8-sig"),
             file_name="betonlab_essais.csv",
-            mime="text/csv"
-        ):
-            enregistrer_action(
+            mime="text/csv",
+            on_click=lambda: enregistrer_action(
                 "Exportation des essais",
-                f"{len(vue)} enregistrement(s) exporté(s)"
+                f"{len(vue)} enregistrement(s)"
             )
+        )
 
         st.divider()
         st.subheader("Supprimer un essai")
@@ -954,9 +886,7 @@ elif page == "Base des essais":
                         st.success("L'essai a été supprimé.")
                         st.rerun()
                 else:
-                    st.warning(
-                        "Veuillez confirmer la suppression avant de continuer."
-                    )
+                    st.warning("Confirmez la suppression avant de continuer.")
 
 
 # =========================================================
@@ -964,102 +894,52 @@ elif page == "Base des essais":
 # =========================================================
 
 elif page == "Statistiques":
-
     st.header("📊 Analyse statistique")
 
-    if s == {}:
-        st.info(
-            "Enregistrez des essais pour afficher les statistiques."
-        )
-
+    if not s:
+        st.info("Enregistrez des essais pour afficher les statistiques.")
     else:
-        colonnes = st.columns(4)
-
         indicateurs = [
             ("Nombre d'essais", str(s["nombre"])),
             ("Moyenne", f'{s["moyenne"]:.2f} MPa'),
             ("Médiane", f'{s["mediane"]:.2f} MPa'),
-            ("Étendue", f'{s["etendue"]:.2f} MPa')
+            ("Étendue", f'{s["etendue"]:.2f} MPa'),
+            ("Minimum", f'{s["minimum"]:.2f} MPa'),
+            ("Maximum", f'{s["maximum"]:.2f} MPa'),
+            ("Écart-type", f'{s["ecart_type"]:.2f} MPa' if s["ecart_type"] is not None else "—"),
+            ("Coefficient de variation", f'{s["cv"]:.2f}%' if s["cv"] is not None else "—")
         ]
 
-        for col, (titre, valeur) in zip(colonnes, indicateurs):
-            with col:
-                st.metric(titre, valeur)
-
-        colonnes = st.columns(4)
-
-        indicateurs = [
-            (
-                "Minimum",
-                f'{s["minimum"]:.2f} MPa'
-            ),
-            (
-                "Maximum",
-                f'{s["maximum"]:.2f} MPa'
-            ),
-            (
-                "Écart-type",
-                f'{s["ecart_type"]:.2f} MPa'
-                if s["ecart_type"] is not None else "—"
-            ),
-            (
-                "Coefficient de variation",
-                f'{s["cv"]:.2f}%'
-                if s["cv"] is not None else "—"
-            )
-        ]
-
-        for col, (titre, valeur) in zip(colonnes, indicateurs):
-            with col:
-                st.metric(titre, valeur)
-
-        st.subheader("Tableau récapitulatif")
+        for debut in range(0, len(indicateurs), 4):
+            colonnes = st.columns(4)
+            for col, (titre, valeur) in zip(colonnes, indicateurs[debut:debut + 4]):
+                col.metric(titre, valeur)
 
         resume = pd.DataFrame({
             "Indicateur": [
-                "Nombre d'essais",
-                "Moyenne",
-                "Médiane",
-                "Minimum",
-                "Maximum",
-                "Étendue",
-                "Écart-type",
-                "Coefficient de variation"
+                "Nombre d'essais", "Moyenne", "Médiane",
+                "Minimum", "Maximum", "Étendue",
+                "Écart-type", "Coefficient de variation"
             ],
             "Valeur": [
-                s["nombre"],
-                s["moyenne"],
-                s["mediane"],
-                s["minimum"],
-                s["maximum"],
-                s["etendue"],
-                s["ecart_type"],
-                s["cv"]
+                s["nombre"], s["moyenne"], s["mediane"],
+                s["minimum"], s["maximum"], s["etendue"],
+                s["ecart_type"], s["cv"]
             ]
         })
 
-        st.dataframe(
-            resume,
-            use_container_width=True,
-            hide_index=True
-        )
+        st.subheader("Tableau récapitulatif")
+        st.dataframe(resume, use_container_width=True, hide_index=True)
 
         gauche, droite = st.columns(2)
 
         with gauche:
-            st.plotly_chart(
-                graphique_boite(df),
-                use_container_width=True
-            )
+            st.plotly_chart(graphique_boite(df), use_container_width=True)
 
         with droite:
-            st.plotly_chart(
-                graphique_histogramme(df),
-                use_container_width=True
-            )
+            st.plotly_chart(graphique_histogramme(df), use_container_width=True)
 
         st.subheader("Test indicatif de normalité")
-
         valeurs = df["strength_mpa"].dropna().to_numpy(dtype=float)
 
         if len(valeurs) >= 3 and np.std(valeurs) > 0:
@@ -1071,33 +951,15 @@ elif page == "Statistiques":
             )
 
             resultat = stats.shapiro(echantillon)
-
-            st.write(
-                f"Statistique de Shapiro-Wilk : "
-                f"**{resultat.statistic:.4f}**"
-            )
-
-            st.write(
-                f"Valeur p : **{resultat.pvalue:.4f}**"
-            )
+            st.write(f"Statistique de Shapiro-Wilk : **{resultat.statistic:.4f}**")
+            st.write(f"Valeur p : **{resultat.pvalue:.4f}**")
 
             if resultat.pvalue < 0.05:
-                st.warning(
-                    "Au seuil de 5 %, le test fournit des éléments "
-                    "contre l'hypothèse de normalité."
-                )
+                st.warning("Au seuil de 5 %, les résultats fournissent des éléments contre l'hypothèse de normalité.")
             else:
-                st.info(
-                    "Au seuil de 5 %, le test ne permet pas de rejeter "
-                    "l'hypothèse de normalité. Cela ne prouve pas "
-                    "que les données suivent une loi normale."
-                )
-
+                st.info("Au seuil de 5 %, le test ne permet pas de rejeter l'hypothèse de normalité. Cela ne prouve pas la normalité.")
         else:
-            st.info(
-                "Le test nécessite au moins trois valeurs et une "
-                "dispersion non nulle."
-            )
+            st.info("Le test nécessite au moins trois valeurs et une dispersion non nulle.")
 
 
 # =========================================================
@@ -1105,39 +967,24 @@ elif page == "Statistiques":
 # =========================================================
 
 elif page == "Probabilités":
-
     st.header("🎯 Analyse des probabilités")
 
     st.write(
-        "Cette rubrique estime les probabilités à partir d'un "
-        "modèle normal ajusté aux résistances observées."
+        "Les probabilités ci-dessous sont estimées à partir "
+        "d'une loi normale ajustée aux résistances observées."
     )
 
     valeurs = df["strength_mpa"].dropna().to_numpy(dtype=float)
 
     if len(valeurs) < 2:
-        st.warning(
-            "Enregistrez au moins deux essais pour calculer "
-            "les probabilités."
-        )
-
+        st.warning("Enregistrez au moins deux essais pour calculer les probabilités.")
     else:
         moyenne = float(np.mean(valeurs))
         ecart_type = float(np.std(valeurs, ddof=1))
 
         c1, c2 = st.columns(2)
-
-        with c1:
-            st.metric(
-                "Résistance moyenne",
-                f"{moyenne:.2f} MPa"
-            )
-
-        with c2:
-            st.metric(
-                "Écart-type",
-                f"{ecart_type:.2f} MPa"
-            )
+        c1.metric("Résistance moyenne", f"{moyenne:.2f} MPa")
+        c2.metric("Écart-type", f"{ecart_type:.2f} MPa")
 
         cible = st.number_input(
             "Résistance cible (MPa)",
@@ -1147,70 +994,34 @@ elif page == "Probabilités":
         )
 
         if ecart_type == 0:
-            st.warning(
-                "La dispersion est nulle. Un modèle normal avec "
-                "écart-type nul ne peut pas être ajusté."
-            )
-
+            st.warning("La dispersion est nulle : le modèle normal ne peut pas être ajusté.")
         else:
-            p_inferieur = float(
-                stats.norm.cdf(
-                    cible,
-                    loc=moyenne,
-                    scale=ecart_type
-                )
-            )
-
+            p_inferieur = float(stats.norm.cdf(cible, loc=moyenne, scale=ecart_type))
             p_superieur = 1 - p_inferieur
 
             c1, c2 = st.columns(2)
-
-            with c1:
-                st.metric(
-                    f"P(X ≤ {cible:.2f} MPa)",
-                    f"{p_inferieur * 100:.2f}%"
-                )
-
-            with c2:
-                st.metric(
-                    f"P(X ≥ {cible:.2f} MPa)",
-                    f"{p_superieur * 100:.2f}%"
-                )
+            c1.metric(f"P(X ≤ {cible:.2f} MPa)", f"{p_inferieur * 100:.2f}%")
+            c2.metric(f"P(X ≥ {cible:.2f} MPa)", f"{p_superieur * 100:.2f}%")
 
             couleurs = THEMES[st.session_state.theme_betonlab]
-
             xx = np.linspace(
                 min(0, moyenne - 4 * ecart_type),
-                moyenne + 4 * ecart_type,
+                max(moyenne + 4 * ecart_type, cible + ecart_type),
                 400
             )
-
-            yy = stats.norm.pdf(
-                xx,
-                loc=moyenne,
-                scale=ecart_type
-            )
+            yy = stats.norm.pdf(xx, loc=moyenne, scale=ecart_type)
 
             fig = go.Figure()
-
             fig.add_trace(go.Scatter(
-                x=xx,
-                y=yy,
-                mode="lines",
+                x=xx, y=yy, mode="lines",
                 name="Densité normale",
-                line=dict(
-                    color=couleurs["primaire"],
-                    width=3
-                )
+                line=dict(color=couleurs["primaire"], width=3)
             ))
 
             masque = xx <= cible
-
             fig.add_trace(go.Scatter(
-                x=xx[masque],
-                y=yy[masque],
-                mode="lines",
-                fill="tozeroy",
+                x=xx[masque], y=yy[masque],
+                mode="lines", fill="tozeroy",
                 name="Probabilité sous la cible",
                 line=dict(width=0),
                 fillcolor="rgba(34,166,153,0.35)"
@@ -1229,17 +1040,13 @@ elif page == "Probabilités":
             )
 
             st.plotly_chart(
-                appliquer_style_graphique(
-                    fig,
-                    "Distribution normale estimée"
-                ),
+                appliquer_style_graphique(fig, "Distribution normale estimée"),
                 use_container_width=True
             )
 
             st.warning(
-                "Ces probabilités sont des estimations fondées sur "
-                "un modèle normal. Elles ne garantissent pas la "
-                "conformité réglementaire du béton."
+                "Ces probabilités sont des estimations statistiques. "
+                "Elles ne garantissent pas la conformité réglementaire du béton."
             )
 
 
@@ -1248,17 +1055,13 @@ elif page == "Probabilités":
 # =========================================================
 
 elif page == "Diagrammes":
-
     st.header("📈 Galerie de diagrammes")
 
     if df.empty:
-        st.info(
-            "Enregistrez des essais pour générer les diagrammes."
-        )
-
+        st.info("Enregistrez des essais pour générer les diagrammes.")
     else:
         choix = st.selectbox(
-            "Choisir le diagramme à afficher",
+            "Choisir le diagramme",
             [
                 "Histogramme des résistances",
                 "Évolution dans le temps",
@@ -1270,16 +1073,12 @@ elif page == "Diagrammes":
 
         if choix == "Histogramme des résistances":
             fig = graphique_histogramme(df)
-
         elif choix == "Évolution dans le temps":
             fig = graphique_evolution(df)
-
         elif choix == "Boîte à moustaches":
             fig = graphique_boite(df)
-
         elif choix == "Distribution normale":
             fig = graphique_normale(df)
-
         else:
             fig = px.scatter(
                 df,
@@ -1293,27 +1092,22 @@ elif page == "Diagrammes":
                     "sample_code": "Éprouvette"
                 }
             )
-
             fig = appliquer_style_graphique(
-                fig,
-                "Résistance en fonction de l'âge du béton"
+                fig, "Résistance en fonction de l'âge du béton"
             )
 
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
+        st.plotly_chart(fig, use_container_width=True)
 
-        if st.download_button(
+        st.download_button(
             "⬇️ Exporter les données des diagrammes",
             data=df.to_csv(index=False).encode("utf-8-sig"),
             file_name="betonlab_donnees_graphiques.csv",
-            mime="text/csv"
-        ):
-            enregistrer_action(
+            mime="text/csv",
+            on_click=lambda: enregistrer_action(
                 "Exportation des données des diagrammes",
                 f"{len(df)} essai(s)"
             )
+        )
 
 
 # =========================================================
@@ -1321,48 +1115,25 @@ elif page == "Diagrammes":
 # =========================================================
 
 elif page == "Historique d'utilisation":
-
     st.header("🕒 Historique d'utilisation")
 
     st.write(
-        "Consultez les actions enregistrées par l'application : "
-        "ajouts, suppressions, consultations et exportations."
+        "Consultez les actions enregistrées : ajouts, suppressions, "
+        "consultations et exportations."
     )
 
     historique = charger_historique()
 
     c1, c2, c3 = st.columns(3)
-
-    with c1:
-        st.metric(
-            "Actions enregistrées",
-            len(historique)
-        )
-
-    with c2:
-        st.metric(
-            "Essais dans la base",
-            len(df)
-        )
-
-    with c3:
-        st.metric(
-            "Rubrique actuelle",
-            "Historique"
-        )
+    c1.metric("Actions enregistrées", len(historique))
+    c2.metric("Essais dans la base", len(df))
+    c3.metric("Rubrique actuelle", "Historique")
 
     if historique.empty:
-        st.info("Aucune action n'a encore été enregistrée.")
-
+        st.info("Aucune action enregistrée pour le moment.")
     else:
-        actions = sorted(
-            historique["Action"].dropna().unique().tolist()
-        )
-
-        filtre = st.selectbox(
-            "Filtrer les actions",
-            ["Toutes les actions"] + actions
-        )
+        actions = sorted(historique["Action"].dropna().unique().tolist())
+        filtre = st.selectbox("Filtrer les actions", ["Toutes les actions"] + actions)
 
         historique_vue = historique.copy()
 
@@ -1377,18 +1148,16 @@ elif page == "Historique d'utilisation":
             hide_index=True
         )
 
-        if st.download_button(
+        st.download_button(
             "⬇️ Exporter l'historique en CSV",
-            data=historique_vue.to_csv(
-                index=False
-            ).encode("utf-8-sig"),
+            data=historique_vue.to_csv(index=False).encode("utf-8-sig"),
             file_name="betonlab_historique.csv",
-            mime="text/csv"
-        ):
-            enregistrer_action(
+            mime="text/csv",
+            on_click=lambda: enregistrer_action(
                 "Exportation de l'historique",
                 f"{len(historique_vue)} action(s) exportée(s)"
             )
+        )
 
 
 # =========================================================
@@ -1398,7 +1167,6 @@ elif page == "Historique d'utilisation":
 st.divider()
 
 st.caption(
-    f"BetonLab • Analyse du béton • "
-    f"Thème : {st.session_state.theme_betonlab} • "
-    "Résistance exprimée en MPa"
+    f"BetonLab • Analyse des essais de compression • "
+    f"Thème : {st.session_state.theme_betonlab}"
 )
