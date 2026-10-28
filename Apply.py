@@ -1,4 +1,4 @@
-[28/10/2026 17:59] Donatella: import os
+import os
 import math
 import hashlib
 
