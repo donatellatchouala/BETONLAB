@@ -191,7 +191,7 @@ def get_engine(database_url):
 
 
 def choose_storage():
-    """Renvoie (url, nom lisible, permanent ?) selon la configuration.
+    """Renvoie (url, nom lisible, permanent ?, remarque) selon la configuration.
 
     STORAGE_MODE (secret ou variable d'environnement) :
       "auto" (défaut) : PostgreSQL si DATABASE_URL existe, sinon SQLite ;
@@ -203,7 +203,7 @@ def choose_storage():
     use_local = st.session_state.get("_use_local_storage", False)
 
     if mode == "sqlite" or use_local or (mode == "auto" and not database_url):
-        return SQLITE_URL, "SQLite local", False
+        return SQLITE_URL, "SQLite local", False, ""
 
     if not database_url:
         st.error(
@@ -213,19 +213,30 @@ def choose_storage():
         st.stop()
 
     try:
-        return normalize_database_url(database_url), "PostgreSQL", True
-    except RuntimeError as error:
-        st.error(str(error))
-        st.stop()
+        return normalize_database_url(database_url), "PostgreSQL", True, ""
+    except RuntimeError:
+        if mode == "postgres":
+            st.error(
+                "Aucun pilote PostgreSQL installé : ajoutez psycopg2-binary "
+                "dans requirements.txt, puis redémarrez l'application."
+            )
+            st.stop()
+        # Mode « auto » : l'application s'ouvre quand même, en stockage local.
+        return SQLITE_URL, "SQLite local", False, (
+            "PostgreSQL n'est pas disponible (pilote absent du serveur) : "
+            "l'application utilise le stockage local. Pour garder les essais "
+            "de façon permanente, ajoutez psycopg2-binary dans "
+            "requirements.txt puis redémarrez l'application."
+        )
 
 
 def connect_storage():
-    url, label, permanent = choose_storage()
+    url, label, permanent, note = choose_storage()
     try:
         engine = get_engine(url)
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
-        return engine, url, label, permanent
+        return engine, url, label, permanent, note
     except Exception as error:
         get_engine.clear()  # ne pas garder en cache un moteur défaillant
         st.error(
@@ -598,7 +609,7 @@ def filter_ui(df, key):
 # 10. DÉMARRAGE
 # ============================================================
 
-engine, DB_URL, STORAGE_LABEL, PERMANENT = connect_storage()
+engine, DB_URL, STORAGE_LABEL, PERMANENT, STORAGE_NOTE = connect_storage()
 
 try:
     init_database(DB_URL)
@@ -659,7 +670,9 @@ if test_mode:
         "🧪 **Mode test actif** : vous travaillez sur la table "
         f"`{TABLE}`. Les vrais essais ne sont pas affectés."
     )
-if not PERMANENT:
+if STORAGE_NOTE:
+    st.warning(STORAGE_NOTE)
+elif not PERMANENT:
     st.warning(
         "Stockage local SQLite : parfait pour tester, mais sur Streamlit "
         "Cloud ce fichier est effacé à chaque redémarrage. Pour garder les "
