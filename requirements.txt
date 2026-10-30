@@ -1,7 +1,6 @@
-streamlit
-pandas
-datetime
-plotly
-scipy
-sqlalchemy
-matplotlib
+streamlit>=1.50,<2
+pandas>=2.2
+numpy>=1.26
+scipy>=1.12
+sqlalchemy>=2.0,<2.2
+psycopg2-binary>=2.9.10
